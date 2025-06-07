@@ -6,7 +6,7 @@ import tensorflow_recommenders as tfrs
 ratings = tfds.load("movielens/100k-ratings", split="train")
 movies = tfds.load("movielens/100k-movies", split="train")
 
-# Garantir que os tensores sejam escalares (shape=[]), para evitar erros de batching
+# Garantir tensores escalares
 ratings = ratings.map(
     lambda x: {
         "movie_title": tf.reshape(x["movie_title"], []),
@@ -16,7 +16,28 @@ ratings = ratings.map(
 
 movies = movies.map(lambda x: {"movie_title": tf.reshape(x["movie_title"], [])})
 
-# 2. Preparar vocabulários
+# 2. Divisão dos dados (80% treino, 10% val, 10% teste)
+total_size = 100_000
+train_size = int(0.8 * total_size)
+val_size = int(0.1 * total_size)
+
+shuffled = ratings.shuffle(total_size, seed=42, reshuffle_each_iteration=False)
+
+train = shuffled.take(train_size)
+val = shuffled.skip(train_size).take(val_size)
+test = shuffled.skip(train_size + val_size)
+
+# flat_map garante que os dados tenham shape uniforme
+train = train.flat_map(lambda x: tf.data.Dataset.from_tensors(x))
+val = val.flat_map(lambda x: tf.data.Dataset.from_tensors(x))
+test = test.flat_map(lambda x: tf.data.Dataset.from_tensors(x))
+
+# Cache e batch
+cached_train = train.batch(8192).cache()
+cached_val = val.batch(4096).cache()
+cached_test = test.batch(4096).cache()
+
+# 3. Vocabulários
 movie_titles = movies.map(lambda x: x["movie_title"])
 user_ids = ratings.map(lambda x: x["user_id"])
 
@@ -24,7 +45,7 @@ unique_movie_titles = list(set(title.numpy().decode("utf-8") for title in movie_
 unique_user_ids = list(set(uid.numpy().decode("utf-8") for uid in user_ids))
 
 
-# 3. Modelos de usuário e filme
+# 4. Modelos
 class MovieModel(tf.keras.Model):
     def __init__(self):
         super().__init__()
@@ -57,7 +78,6 @@ class UserModel(tf.keras.Model):
         return self.embedding(user_ids)
 
 
-# 4. Modelo de recomendação
 class MovieRetrievalModel(tfrs.models.Model):
     def __init__(self, user_model, movie_model):
         super().__init__()
@@ -77,12 +97,11 @@ class MovieRetrievalModel(tfrs.models.Model):
         return self.task(user_embeddings, movie_embeddings)
 
 
-# 5. Treinamento
-cached_ratings = ratings.shuffle(100_000).batch(8192).cache()
-
+# 5. Treinamento com validação
 model = MovieRetrievalModel(UserModel(), MovieModel())
 model.compile(optimizer=tf.keras.optimizers.Adagrad(0.5))
-model.fit(cached_ratings, epochs=3)
+
+model.fit(cached_train, validation_data=cached_val, epochs=3)
 
 # 6. Recomendações
 index = tfrs.layers.factorized_top_k.BruteForce(model.user_model)
@@ -92,13 +111,8 @@ index.index_from_dataset(
     )
 )
 
-# Exibe recomendações para um usuário específico
 user_id = "42"
 scores, titles = index(tf.constant([user_id]))
 print(f"\n🎬 Filmes recomendados para o usuário {user_id}:\n")
 for title in titles[0, :5].numpy():
     print(f" - {title.decode('utf-8')}")
-
-# Verificação de versão
-# print(f"\n✅ TensorFlow: {tf.__version__}")
-# print(f"✅ TFRS: {tfrs.__version__}")
